@@ -1,0 +1,5 @@
+{
+    "rust-analyzer.check.features": ["deno"],
+    "rust-analyzer.check.command": "clippy",
+    "editor.formatOnSave": true
+}

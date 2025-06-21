@@ -1,0 +1,20 @@
+[package]
+name = "facet-v8"
+version = "0.1.0"
+edition = "2024"
+authors = ["Simon Ask Ulsnes <simon@ulsnes.dk>"]
+
+[dependencies]
+bytemuck = "1.23.1"
+deno_core = { version = "0.350.0", default-features = false, optional = true }
+facet-core = { version = "0.27.14", default-features = false, features = ["alloc"] }
+facet-reflect = { version = "0.27.14", default-features = false, features = ["alloc"] }
+thiserror = "2.0.12"
+v8 = "137.2.0"
+
+[dev-dependencies]
+serial_test = "3.2.0"
+facet = { version = "0.27.14", default-features = false, features = ["alloc", "reflect"] }
+
+[features]
+deno = ["dep:deno_core"]
