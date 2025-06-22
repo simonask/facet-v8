@@ -1,3 +1,5 @@
+use std::mem::MaybeUninit;
+
 use facet_core::{Def, Facet, Field, Shape, StructKind, Type, UserType};
 use facet_reflect::{Partial, Peek, ReflectError, VariantError};
 
@@ -10,7 +12,7 @@ mod scalar;
 mod set;
 
 pub use object::Constructors;
-use pointer::MarshalPointers;
+use pointer::{MarshalPointers, UnmarshalPointers};
 
 struct MarshalState<'mem, 'scope, 'constructors, 'env> {
     // Cached null to avoid creating a huge number of locals.
@@ -23,12 +25,29 @@ struct MarshalState<'mem, 'scope, 'constructors, 'env> {
     pub constructors: &'constructors mut object::Constructors<'scope, 'env>,
 }
 
+struct UnmarshalState<'mem, 'scope> {
+    pub pointers: UnmarshalPointers<'mem, 'scope>,
+    pub string_conversion_buffer: Box<[MaybeUninit<u8>; 128]>,
+}
+
 #[derive(Debug)]
 pub enum Error<'shape> {
     Exception,
     Reflect(ReflectError<'shape>),
     Variant(VariantError),
     ClobberedTypeTag(&'shape Shape<'shape>),
+    UnexpectedValue {
+        shape: &'shape Shape<'shape>,
+        unexpected: &'static str,
+    },
+    IntOverflow(&'shape Shape<'shape>),
+}
+
+impl<'shape> Error<'shape> {
+    #[inline]
+    pub(crate) fn unexpected(shape: &'shape Shape<'shape>, unexpected: &'static str) -> Self {
+        Error::UnexpectedValue { shape, unexpected }
+    }
 }
 
 impl std::fmt::Display for Error<'_> {
@@ -41,6 +60,12 @@ impl std::fmt::Display for Error<'_> {
                 f,
                 "serializing this enum variant would clobber the type tag: {shape}"
             ),
+            Error::UnexpectedValue { shape, unexpected } => {
+                write!(f, "cannot deserialize {shape} from {unexpected}")
+            }
+            Error::IntOverflow(shape) => {
+                write!(f, "integer overflow while deserializing {shape}")
+            }
         }
     }
 }
@@ -89,19 +114,25 @@ pub fn to_v8_with_constructors<'facet, 'scope, 'env, T: Facet<'facet>>(
 pub fn from_v8<'facet, 'scope, T: Facet<'facet>>(
     scope: &mut v8::HandleScope<'scope>,
     value: v8::Local<'scope, v8::Value>,
-) -> Result<Box<T>, Error<'facet>> {
+) -> Result<T, Error<'facet>> {
     let mut partial = Partial::alloc_shape(T::SHAPE)?;
     from_v8_partial(scope, value, &mut partial)?;
     let value = partial.build()?.materialize()?;
     Ok(value)
 }
 
-pub fn from_v8_partial<'scope, 'facet, 'shape>(
+/// Populate an already allocated [`Partial`] with the contents of a V8 value.
+pub fn from_v8_partial<'scope, 'facet, 'shape: 'facet>(
     scope: &mut v8::HandleScope<'scope>,
     value: v8::Local<'scope, v8::Value>,
     partial: &mut Partial<'facet, 'shape>,
 ) -> Result<(), Error<'facet>> {
-    todo!()
+    let mut state = UnmarshalState {
+        pointers: UnmarshalPointers::default(),
+        string_conversion_buffer: Box::new([MaybeUninit::uninit(); 128]),
+    };
+    unmarshal_value(scope, value, partial, &mut state)?;
+    Ok(())
 }
 
 /// Returns `true` if values with the given shape will be serialized as a JS
@@ -149,7 +180,7 @@ fn marshal_value<'mem, 'facet: 'mem, 'shape: 'facet, 'scope>(
     }
 
     if let Def::SmartPointer(_) = shape.def {
-        return pointer::serialize_smart_pointer(
+        return pointer::marshal_smart_pointer(
             peek.into_smart_pointer().unwrap(),
             scope,
             state,
@@ -157,11 +188,11 @@ fn marshal_value<'mem, 'facet: 'mem, 'shape: 'facet, 'scope>(
         );
     }
     if let Type::Pointer(pointer_type) = shape.ty {
-        return pointer::serialize_pointer(peek, pointer_type, scope, state);
+        return pointer::marshal_pointer(peek, pointer_type, scope, state);
     }
     if let Type::User(UserType::Enum(enum_type)) = shape.ty {
         if !enum_::will_serialize_as_object(enum_type) {
-            return enum_::serialize_enum_unit(peek.into_enum()?, enum_type, scope);
+            return enum_::marshal_enum_unit(peek.into_enum()?, enum_type, scope);
         }
     }
 
@@ -185,8 +216,8 @@ fn marshal_into_object<'mem, 'facet: 'mem, 'shape: 'facet, 'scope>(
     );
 
     match (shape.def, shape.ty) {
-        (Def::Map(_), _) => map::serialize_map_into(peek.into_map()?, scope, object, state),
-        (Def::Set(_), _) => set::serialize_set_into(peek, scope, object, state),
+        (Def::Map(_), _) => map::marshal_map_into(peek.into_map()?, scope, object, state),
+        (Def::Set(_), _) => set::marshal_set_into(peek, scope, object, state),
         (Def::List(_) | Def::Array(_) | Def::Slice(_), _) => {
             array::marshal_list_object(peek, scope, object, state)
         }
@@ -194,10 +225,77 @@ fn marshal_into_object<'mem, 'facet: 'mem, 'shape: 'facet, 'scope>(
             array::marshal_tuple_object(peek.into_tuple()?, scope, object, state)
         }
         (_, Type::User(UserType::Enum(_))) => {
-            enum_::serialize_enum_object_into(peek.into_enum()?, scope, object, state)
+            enum_::marshal_enum_object_into(peek.into_enum()?, scope, object, state)
         }
         (_, Type::User(UserType::Struct(_))) => {
             object::marshal_struct(peek.into_struct()?, scope, object, state)
+        }
+        _ => Err(ReflectError::OperationFailed {
+            shape,
+            operation: "unsupported type for serialization (unknown def or type)",
+        }
+        .into()),
+    }
+}
+
+fn unmarshal_value<'scope, 'partial, 'facet, 'shape: 'facet>(
+    scope: &mut v8::HandleScope<'scope>,
+    value: v8::Local<'scope, v8::Value>,
+    partial: &'partial mut Partial<'facet, 'shape>,
+    state: &mut UnmarshalState<'_, 'scope>,
+) -> Result<&'partial mut Partial<'facet, 'shape>, Error<'shape>> {
+    let shape = partial.shape();
+
+    if let (Def::Scalar(_), _) | (_, Type::Primitive(_)) = (shape.def, shape.ty) {
+        return scalar::scalar_from_v8(scope, value, partial, state);
+    }
+
+    if let Def::Option(_) = shape.def {
+        if value.is_null_or_undefined() {
+            return partial.set_default().map_err(Into::into);
+        }
+        return unmarshal_value(scope, value, partial.begin_some()?, state)?
+            .end()
+            .map_err(Into::into);
+    }
+
+    if let Def::SmartPointer(_) = shape.def {
+        return pointer::unmarshal_smart_pointer(scope, value, partial, state);
+    }
+    if let Type::Pointer(_) = shape.ty {
+        return pointer::unmarshal_pointer(scope, value, partial, state);
+    }
+    if let Type::User(UserType::Enum(_)) = shape.ty {
+        return enum_::unmarshal_enum(scope, value, partial, state);
+    }
+
+    let object = value
+        .try_into()
+        .map_err(|_| ReflectError::OperationFailed {
+            shape,
+            operation: "expected an object",
+        })?;
+    unmarshal_object(scope, object, partial, state)
+}
+
+fn unmarshal_object<'scope, 'partial, 'facet, 'shape: 'facet>(
+    scope: &mut v8::HandleScope<'scope>,
+    value: v8::Local<'scope, v8::Object>,
+    partial: &'partial mut Partial<'facet, 'shape>,
+    state: &mut UnmarshalState<'_, 'scope>,
+) -> Result<&'partial mut Partial<'facet, 'shape>, Error<'shape>> {
+    let shape = partial.shape();
+    match (shape.def, shape.ty) {
+        (Def::Map(_), _) => map::unmarshal_map(scope, value, partial, state),
+        (Def::Set(_), _) => set::unmarshal_set(scope, value, partial, state),
+        (Def::List(_) | Def::Array(_) | Def::Slice(_), _) => {
+            array::unmarshal_list_object(scope, value, partial, state)
+        }
+        (_, Type::User(UserType::Struct(struct_type))) if struct_type.kind == StructKind::Tuple => {
+            array::unmarshal_tuple(scope, value, partial, state)
+        }
+        (_, Type::User(UserType::Struct(_))) => {
+            object::unmarshal_struct(scope, value, partial, state)
         }
         _ => Err(ReflectError::OperationFailed {
             shape,

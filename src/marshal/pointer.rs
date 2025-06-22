@@ -1,16 +1,21 @@
 use std::collections::HashMap;
 
-use facet_core::{Field, KnownSmartPointer, PointerType, PtrConst};
-use facet_reflect::{Peek, PeekSmartPointer, ReflectError};
+use facet_core::{Def, Field, KnownSmartPointer, PointerType, PtrConst, SmartPointerDef};
+use facet_reflect::{Partial, Peek, PeekSmartPointer, ReflectError};
 
-use super::{Error, MarshalState, will_marshal_as_object};
+use super::{Error, MarshalState, UnmarshalState, will_marshal_as_object};
 
 #[derive(Default)]
 pub struct MarshalPointers<'mem, 'scope> {
     shared_pointers: HashMap<PtrConst<'mem>, v8::Local<'scope, v8::Object>>,
 }
 
-pub fn serialize_smart_pointer<'mem, 'facet: 'mem, 'shape: 'facet, 'scope>(
+#[derive(Default)]
+pub struct UnmarshalPointers<'mem, 'scope> {
+    objects: HashMap<v8::Local<'scope, v8::Object>, PtrConst<'mem>>,
+}
+
+pub fn marshal_smart_pointer<'mem, 'facet: 'mem, 'shape: 'facet, 'scope>(
     peek: PeekSmartPointer<'mem, 'facet, 'shape>,
     scope: &mut v8::HandleScope<'scope>,
     state: &mut MarshalState<'mem, 'scope, '_, '_>,
@@ -60,7 +65,39 @@ pub fn serialize_smart_pointer<'mem, 'facet: 'mem, 'shape: 'facet, 'scope>(
     }
 }
 
-pub fn serialize_pointer<'mem, 'facet, 'shape, 'scope>(
+pub fn unmarshal_smart_pointer<'scope, 'partial, 'facet, 'shape: 'facet>(
+    scope: &mut v8::HandleScope<'scope>,
+    value: v8::Local<'scope, v8::Value>,
+    partial: &'partial mut Partial<'facet, 'shape>,
+    state: &mut UnmarshalState<'_, 'scope>,
+) -> Result<&'partial mut facet_reflect::Partial<'facet, 'shape>, Error<'shape>> {
+    let shape = partial.shape();
+    let Def::SmartPointer(SmartPointerDef { known, .. }) = shape.def else {
+        panic!("expected a smart pointer shape");
+    };
+    let (is_shared, is_weak) = match known {
+        Some(KnownSmartPointer::Arc | KnownSmartPointer::Rc) => (true, false),
+        Some(KnownSmartPointer::ArcWeak | KnownSmartPointer::RcWeak) => (true, true),
+        _ => (false, false),
+    };
+
+    if is_weak {
+        unimplemented!("weak smart pointers are not supported (yet)");
+    }
+
+    // TODO: Once we gain general support for references (immutable borrows),
+    // all pointers are essentially shared pointers.
+
+    if is_shared {
+        unimplemented!("shared smart pointers are not supported (yet)");
+    }
+
+    super::unmarshal_value(scope, value, partial.begin_smart_ptr()?, state)?
+        .end()
+        .map_err(Into::into)
+}
+
+pub fn marshal_pointer<'mem, 'facet, 'shape, 'scope>(
     peek: Peek<'mem, 'facet, 'shape>,
     pointer_type: PointerType<'shape>,
     scope: &mut v8::HandleScope<'scope>,
@@ -90,4 +127,17 @@ pub fn serialize_pointer<'mem, 'facet, 'shape, 'scope>(
             operation: "cannot serialize function pointers",
         })),
     }
+}
+
+pub fn unmarshal_pointer<'scope, 'partial, 'facet, 'shape: 'facet>(
+    scope: &mut v8::HandleScope<'scope>,
+    value: v8::Local<'scope, v8::Value>,
+    partial: &'partial mut Partial<'facet, 'shape>,
+    state: &mut UnmarshalState<'_, 'scope>,
+) -> Result<&'partial mut facet_reflect::Partial<'facet, 'shape>, Error<'shape>> {
+    _ = (scope, value, state);
+    unimplemented!(
+        "unmarshaling pointers/references is not supported yet: {}",
+        partial.shape()
+    );
 }

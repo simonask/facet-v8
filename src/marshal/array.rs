@@ -3,6 +3,8 @@ use std::mem::MaybeUninit;
 use facet_core::{ConstTypeId, Field, FieldAttribute, Shape};
 use facet_reflect::{Partial, Peek, PeekTuple};
 
+use crate::marshal::UnmarshalState;
+
 use super::{Error, MarshalState};
 
 /// Populate an array-like JS object from an array-like Rust type.
@@ -61,6 +63,45 @@ pub fn marshal_list_object<'mem, 'facet: 'mem, 'shape: 'mem + 'facet, 'scope>(
     }
 }
 
+pub fn unmarshal_list_object<'scope, 'partial, 'facet, 'shape: 'facet>(
+    scope: &mut v8::HandleScope<'scope>,
+    object: v8::Local<'scope, v8::Object>,
+    partial: &'partial mut Partial<'facet, 'shape>,
+    state: &mut UnmarshalState<'_, 'scope>,
+) -> Result<&'partial mut Partial<'facet, 'shape>, Error<'shape>> {
+    if let Ok(array) = object.try_into() {
+        unmarshal_array_object(scope, array, partial, state)
+    } else if object.is_typed_array() {
+        // Fast paths for typed arrays.
+        if let Ok(array) = v8::Local::<v8::Uint8Array>::try_from(object) {
+            u8::unmarshal(scope, array, partial)?;
+        } else if let Ok(array) = v8::Local::<v8::Int8Array>::try_from(object) {
+            i8::unmarshal(scope, array, partial)?;
+        } else if let Ok(array) = v8::Local::<v8::Uint16Array>::try_from(object) {
+            u16::unmarshal(scope, array, partial)?;
+        } else if let Ok(array) = v8::Local::<v8::Int16Array>::try_from(object) {
+            i16::unmarshal(scope, array, partial)?;
+        } else if let Ok(array) = v8::Local::<v8::Uint32Array>::try_from(object) {
+            u32::unmarshal(scope, array, partial)?;
+        } else if let Ok(array) = v8::Local::<v8::Int32Array>::try_from(object) {
+            i32::unmarshal(scope, array, partial)?;
+        } else if let Ok(array) = v8::Local::<v8::Float32Array>::try_from(object) {
+            f32::unmarshal(scope, array, partial)?;
+        } else if let Ok(array) = v8::Local::<v8::Float64Array>::try_from(object) {
+            f64::unmarshal(scope, array, partial)?;
+        } else {
+            unreachable!("unhandled TypedArray type (did JS gain new ones?)");
+        }
+
+        Ok(partial)
+    } else {
+        Err(Error::UnexpectedValue {
+            shape: partial.shape(),
+            unexpected: object.type_repr(),
+        })
+    }
+}
+
 /// Marshal each item from an iterator and set its value in the array-like
 /// object. `array` can be any object that supports `set_index()`, including
 /// `v8::Array` or any of the typed arrays.
@@ -79,6 +120,26 @@ fn marshal_array_object<'mem, 'facet: 'mem, 'shape: 'facet, 'scope>(
     Ok(())
 }
 
+fn unmarshal_array_object<'scope, 'partial, 'facet, 'shape: 'facet>(
+    scope: &mut v8::HandleScope<'scope>,
+    object: v8::Local<'scope, v8::Array>,
+    partial: &'partial mut Partial<'facet, 'shape>,
+    state: &mut UnmarshalState<'_, 'scope>,
+) -> Result<&'partial mut Partial<'facet, 'shape>, Error<'shape>> {
+    let len = object.length();
+    let has_default = partial.shape().has_default_attr();
+    partial.begin_list()?;
+    for i in 0..len {
+        let item = object.get_index(scope, i).ok_or(Error::Exception)?;
+        super::unmarshal_value(scope, item, partial.begin_list_item()?, state)?.end()?;
+    }
+    if has_default {
+        partial.fill_unset_fields_from_default()?;
+    }
+    // Note: `begin_list()` does not push a frame.
+    Ok(partial)
+}
+
 pub fn marshal_tuple_object<'mem, 'facet: 'mem, 'shape: 'facet, 'scope>(
     peek: PeekTuple<'mem, 'facet, 'shape>,
     scope: &mut v8::HandleScope<'scope>,
@@ -92,6 +153,22 @@ pub fn marshal_tuple_object<'mem, 'facet: 'mem, 'shape: 'facet, 'scope>(
             .ok_or(Error::Exception)?;
     }
     Ok(())
+}
+
+pub fn unmarshal_tuple<'scope, 'partial, 'facet, 'shape: 'facet>(
+    scope: &mut v8::HandleScope<'scope>,
+    object: v8::Local<'scope, v8::Object>,
+    partial: &'partial mut Partial<'facet, 'shape>,
+    state: &mut UnmarshalState<'_, 'scope>,
+) -> Result<&'partial mut Partial<'facet, 'shape>, Error<'shape>> {
+    if let Ok(array) = object.try_into() {
+        unmarshal_array_object(scope, array, partial, state)
+    } else {
+        Err(Error::UnexpectedValue {
+            shape: partial.shape(),
+            unexpected: object.type_repr(),
+        })
+    }
 }
 
 /// Create an array for the given shape.
@@ -145,7 +222,7 @@ fn create_arraybuffer_for_shape<'shape, 'scope>(
     Ok(buffer)
 }
 
-trait TypedArrayType: bytemuck::Pod + facet_core::Facet<'static> + 'static {
+trait TypedArrayType: bytemuck::Pod + 'static {
     type TypedArray<'scope>: Into<v8::Local<'scope, v8::TypedArray>> + Copy;
     fn create_typed_array_for_len<'scope>(
         scope: &mut v8::HandleScope<'scope>,
@@ -166,16 +243,21 @@ trait TypedArrayType: bytemuck::Pod + facet_core::Facet<'static> + 'static {
 
     /// Given a `TypedArray` handle and a `Partial` container, copy the data
     /// from the array into the container in the fastest possible way.
-    fn unmarshal<'scope>(
+    fn unmarshal<'scope, 'partial, 'facet, 'shape>(
         scope: &mut v8::HandleScope<'scope>,
         handle: Self::TypedArray<'scope>,
-        container: &mut Partial<'static, 'static>,
-    ) -> Result<(), Error<'static>>;
+        container: &'partial mut Partial<'facet, 'shape>,
+    ) -> Result<&'partial mut Partial<'facet, 'shape>, Error<'shape>>;
 
-    fn copy_to_partial_list<'shape>(
+    fn copy_to_partial_list<'partial, 'facet, 'shape>(
         buffer: v8::Local<v8::ArrayBuffer>,
-        partial: &mut Partial<'static, 'static>,
-    ) -> Result<(), Error<'shape>> {
+        partial: &'partial mut Partial<'facet, 'shape>,
+    ) -> Result<&'partial mut Partial<'facet, 'shape>, Error<'shape>>
+    where
+        // TODO: Not sure why these are needed.
+        Vec<Self>: facet_core::Facet<'facet>,
+        Self: facet_core::Facet<'facet>,
+    {
         let byte_len = buffer.byte_length();
         let buffer_bytes: &[u8] = unsafe {
             buffer
@@ -197,7 +279,7 @@ trait TypedArrayType: bytemuck::Pod + facet_core::Facet<'static> + 'static {
                 );
                 let vec: Vec<Self> = std::mem::transmute(vec);
                 partial.set(vec)?;
-                return Ok(());
+                return Ok(partial);
             }
         }
 
@@ -206,8 +288,8 @@ trait TypedArrayType: bytemuck::Pod + facet_core::Facet<'static> + 'static {
             let item: Self = bytemuck::pod_read_unaligned(chunk);
             partial.push(item)?;
         }
-        partial.end()?;
-        Ok(())
+        // Note: `begin_list()` does not push a frame.
+        Ok(partial)
     }
 
     fn set_data_slice<'scope>(buffer: v8::Local<'scope, v8::ArrayBuffer>, data: &[Self]) {
@@ -306,15 +388,16 @@ macro_rules! impl_typed_array_type {
                 Ok(())
             }
 
-            fn unmarshal<'scope>(
+            fn unmarshal<'scope, 'partial, 'facet, 'shape>(
                 scope: &mut v8::HandleScope<'scope>,
                 handle: Self::TypedArray<'scope>,
-                container: &mut Partial<'static, 'static>,
-            ) -> Result<(), Error<'static>> {
+                container: &'partial mut Partial<'facet, 'shape>,
+            ) -> Result<&'partial mut Partial<'facet, 'shape>, Error<'shape>> {
                 let buffer = handle
                     .buffer(scope)
                     .expect("typed array does not have a backing array buffer");
-                Self::copy_to_partial_list(buffer, container)
+                Self::copy_to_partial_list(buffer, container)?;
+                Ok(container)
             }
         }
     };

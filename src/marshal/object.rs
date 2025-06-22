@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
-use super::{Error, MarshalState};
+use super::{Error, MarshalState, UnmarshalState};
 use facet_core::{ConstTypeId, Def, Facet, Field};
-use facet_reflect::{HasFields as _, Peek, PeekStruct};
+use facet_reflect::{HasFields as _, Partial, Peek, PeekStruct};
 
 /// Customize how to map Rust types to JavaScript objects.
 ///
@@ -219,4 +219,47 @@ pub fn marshal_struct<'mem, 'facet: 'mem, 'shape: 'facet, 'scope>(
             .ok_or(Error::Exception)?;
     }
     Ok(())
+}
+
+pub fn unmarshal_struct<'scope, 'partial, 'facet, 'shape: 'facet>(
+    scope: &mut v8::HandleScope<'scope>,
+    object: v8::Local<'scope, v8::Object>,
+    partial: &'partial mut Partial<'facet, 'shape>,
+    state: &mut UnmarshalState<'_, 'scope>,
+) -> Result<&'partial mut Partial<'facet, 'shape>, Error<'shape>> {
+    let property_names = object
+        .get_property_names(
+            scope,
+            v8::GetPropertyNamesArgs {
+                // Including the prototype would mean also including things like
+                // `constructor` etc. that we don't want.
+                mode: v8::KeyCollectionMode::OwnOnly,
+                property_filter: v8::PropertyFilter::ALL_PROPERTIES,
+                index_filter: v8::IndexFilter::SkipIndices,
+                key_conversion: v8::KeyConversionMode::ConvertToString,
+            },
+        )
+        .ok_or(Error::Exception)?;
+
+    for i in 0..property_names.length() {
+        let key = property_names.get_index(scope, i).ok_or(Error::Exception)?;
+        let key = v8::Local::<v8::String>::try_from(key)
+            .expect("v8::GetPropertyNames() returned a non-string key");
+        let field_name = key.to_rust_cow_lossy(scope, &mut state.string_conversion_buffer);
+        let value = object.get(scope, key.into()).ok_or(Error::Exception)?;
+        let Some(field_index) = partial.field_index(&field_name) else {
+            // Just skip unknown fields. The JS side may add any number of
+            // additional fields for all kinds of reasons, including adding them
+            // in a custom constructor.
+            continue;
+        };
+        super::unmarshal_value(scope, value, partial.begin_nth_field(field_index)?, state)?
+            .end()?;
+    }
+
+    if partial.shape().has_default_attr() {
+        partial.fill_unset_fields_from_default()?;
+    }
+
+    Ok(partial)
 }

@@ -1,9 +1,9 @@
 use facet_core::Def;
-use facet_reflect::Peek;
+use facet_reflect::{Partial, Peek};
 
-use super::{Error, MarshalState};
+use super::{Error, MarshalState, UnmarshalState};
 
-pub fn serialize_set_into<'mem, 'facet: 'mem, 'shape: 'facet, 'scope>(
+pub fn marshal_set_into<'mem, 'facet: 'mem, 'shape: 'facet, 'scope>(
     peek: Peek<'mem, 'facet, 'shape>,
     scope: &mut v8::HandleScope<'scope>,
     object: v8::Local<'scope, v8::Object>,
@@ -22,6 +22,28 @@ pub fn serialize_set_into<'mem, 'facet: 'mem, 'shape: 'facet, 'scope>(
         set.add(scope, item_value).ok_or(Error::Exception)?;
     }
     Ok(())
+}
+
+pub fn unmarshal_set<'scope, 'partial, 'facet, 'shape: 'facet>(
+    scope: &mut v8::HandleScope<'scope>,
+    object: v8::Local<'scope, v8::Object>,
+    partial: &'partial mut Partial<'facet, 'shape>,
+    state: &mut UnmarshalState<'_, 'scope>,
+) -> Result<&'partial mut Partial<'facet, 'shape>, Error<'shape>> {
+    let shape = partial.shape();
+    let set = v8::Local::<v8::Set>::try_from(object).map_err(|_| Error::UnexpectedValue {
+        shape,
+        unexpected: object.type_repr(),
+    })?;
+
+    let array = set.as_array(scope);
+    partial.begin_list()?;
+    for i in 0..array.length() {
+        let item = array.get_index(scope, i).ok_or(Error::Exception)?;
+        super::unmarshal_value(scope, item, partial.begin_list_item()?, state)?.end()?;
+    }
+    // Note: `begin_list()` does not push a frame.
+    Ok(partial)
 }
 
 // TODO: This is missing from `facet`.

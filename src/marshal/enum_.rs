@@ -1,7 +1,7 @@
 use facet_core::{EnumType, Shape, StructKind};
-use facet_reflect::{HasFields as _, PeekEnum};
+use facet_reflect::{HasFields as _, Partial, PeekEnum, ReflectError};
 
-use super::{Error, MarshalState};
+use super::{Error, MarshalState, UnmarshalState};
 
 /// The type of the enum tag.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -100,7 +100,7 @@ fn serialize_enum_tag<'scope>(
 ///
 /// Depending on the enum's attributes, this returns either a string (the
 /// variant name) or a number (the discriminant value).
-pub fn serialize_enum_unit<'mem, 'facet, 'shape, 'scope>(
+pub fn marshal_enum_unit<'mem, 'facet, 'shape, 'scope>(
     peek: PeekEnum<'mem, 'facet, 'shape>,
     enum_type: EnumType<'shape>,
     scope: &mut v8::HandleScope<'scope>,
@@ -117,7 +117,7 @@ pub fn serialize_enum_unit<'mem, 'facet, 'shape, 'scope>(
     ))
 }
 
-pub fn serialize_enum_object_into<'mem, 'facet: 'mem, 'shape: 'facet, 'scope>(
+pub fn marshal_enum_object_into<'mem, 'facet: 'mem, 'shape: 'facet, 'scope>(
     peek: PeekEnum<'mem, 'facet, 'shape>,
     scope: &mut v8::HandleScope<'scope>,
     object: v8::Local<'scope, v8::Object>,
@@ -161,4 +161,125 @@ pub fn serialize_enum_object_into<'mem, 'facet: 'mem, 'shape: 'facet, 'scope>(
     }
 
     Ok(())
+}
+
+pub fn unmarshal_enum<'scope, 'partial, 'facet, 'shape: 'facet>(
+    scope: &mut v8::HandleScope<'scope>,
+    value: v8::Local<'scope, v8::Value>,
+    partial: &'partial mut facet_reflect::Partial<'facet, 'shape>,
+    state: &mut UnmarshalState<'_, 'scope>,
+) -> Result<&'partial mut Partial<'facet, 'shape>, Error<'shape>> {
+    if let Ok(object) = value.try_into() {
+        unmarshal_enum_from_object(scope, object, partial, state)
+    } else {
+        // Note: `unmarshal_enum_begin_with_tag()` does not push a frame.
+        unmarshal_enum_begin_with_tag(scope, value, partial, state)?
+            .fill_unset_fields_from_default()
+            .map_err(Into::into)
+    }
+}
+
+fn unmarshal_enum_from_object<'scope, 'partial, 'facet, 'shape: 'facet>(
+    scope: &mut v8::HandleScope<'scope>,
+    object: v8::Local<'scope, v8::Object>,
+    partial: &'partial mut facet_reflect::Partial<'facet, 'shape>,
+    state: &mut UnmarshalState<'_, 'scope>,
+) -> Result<&'partial mut Partial<'facet, 'shape>, Error<'shape>> {
+    let shape = partial.shape();
+    // TODO: Cache this.
+    let enum_behavior = enum_behavior_for_shape(shape);
+
+    // TODO: Cache this.
+    let tag_field = v8::String::new_from_utf8(
+        scope,
+        enum_behavior.js_enum_tag.as_bytes(),
+        v8::NewStringType::Internalized,
+    )
+    .expect("failed to create enum tag string");
+
+    let Some(tag) = object.get(scope, tag_field.into()) else {
+        return Err(ReflectError::OperationFailed {
+            shape,
+            operation: "enum object must have a tag field",
+        }
+        .into());
+    };
+
+    let partial = unmarshal_enum_begin_with_tag(scope, tag, partial, state)?;
+
+    let property_names = object
+        .get_property_names(
+            scope,
+            v8::GetPropertyNamesArgs {
+                mode: v8::KeyCollectionMode::OwnOnly,
+                property_filter: v8::PropertyFilter::ALL_PROPERTIES,
+                // This could be a tuple variant, so we need the indices.
+                index_filter: v8::IndexFilter::IncludeIndices,
+                key_conversion: v8::KeyConversionMode::KeepNumbers,
+            },
+        )
+        .ok_or(Error::Exception)?;
+
+    for i in 0..property_names.length() {
+        let key = property_names.get_index(scope, i).ok_or(Error::Exception)?;
+        let value = object.get(scope, key).ok_or(Error::Exception)?;
+
+        if let Ok(tuple_variant_index) = v8::Local::<v8::Integer>::try_from(key) {
+            let tuple_variant_index: usize = tuple_variant_index.value().try_into().map_err(|_| {
+                ReflectError::OperationFailed {
+                    shape,
+                    operation: "enum object has a numeric key that is not a valid tuple variant index",
+                }
+            })?;
+            super::unmarshal_value(
+                scope,
+                value,
+                partial.begin_nth_enum_field(tuple_variant_index)?,
+                state,
+            )?
+            .end()?;
+        } else if let Ok(field_name) = v8::Local::<v8::String>::try_from(key) {
+            let field_name =
+                field_name.to_rust_cow_lossy(scope, &mut state.string_conversion_buffer);
+            if field_name == enum_behavior.js_enum_tag {
+                // Skip the enum tag field.
+                continue;
+            }
+            let Some(field_index) = partial.field_index(&field_name) else {
+                // Just skip unknown fields.
+                continue;
+            };
+            super::unmarshal_value(scope, value, partial.begin_nth_field(field_index)?, state)?
+                .end()?;
+        } else {
+            return Err(ReflectError::OperationFailed {
+                shape,
+                operation: "enum object has a key that is neither a string nor a number",
+            }
+            .into());
+        }
+    }
+
+    // Note: `unmarshal_struct_fields` does not push a frame.
+    Ok(partial)
+}
+
+fn unmarshal_enum_begin_with_tag<'scope, 'partial, 'facet, 'shape>(
+    scope: &mut v8::HandleScope<'scope>,
+    value: v8::Local<'scope, v8::Value>,
+    partial: &'partial mut facet_reflect::Partial<'facet, 'shape>,
+    state: &mut UnmarshalState<'_, 'scope>,
+) -> Result<&'partial mut Partial<'facet, 'shape>, ReflectError<'shape>> {
+    if let Ok(string) = v8::Local::<v8::String>::try_from(value) {
+        let variant_name = string.to_rust_cow_lossy(scope, &mut state.string_conversion_buffer);
+        partial.select_variant_named(&variant_name)
+    } else if let Ok(integer) = v8::Local::<v8::Integer>::try_from(value) {
+        let variant_repr = integer.value();
+        partial.select_variant(variant_repr)
+    } else {
+        return Err(ReflectError::OperationFailed {
+            shape: partial.shape(),
+            operation: "enum tag must be a string or number",
+        });
+    }
 }

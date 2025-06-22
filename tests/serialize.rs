@@ -1,7 +1,7 @@
 use std::rc::Rc;
 
 use facet::Facet;
-use facet_v8::{Constructors, to_v8, to_v8_with_constructors};
+use facet_v8::{Constructors, from_v8, to_v8, to_v8_with_constructors};
 use serial_test::serial;
 
 mod util;
@@ -9,7 +9,7 @@ use util::{check_function, compile_function, run};
 
 #[test]
 #[serial]
-fn serialize_scalar() {
+fn scalar() {
     run(|scope| {
         let uint = to_v8(scope, &123u32).unwrap();
         assert_eq!(
@@ -18,6 +18,7 @@ fn serialize_scalar() {
                 .value(),
             123.0
         );
+        assert_eq!(from_v8::<u32>(scope, uint).unwrap(), 123u32);
 
         let int = to_v8(scope, &-123i32).unwrap();
         assert_eq!(
@@ -26,6 +27,7 @@ fn serialize_scalar() {
                 .value(),
             -123.0
         );
+        assert_eq!(from_v8::<i32>(scope, int).unwrap(), -123i32);
 
         let float = to_v8(scope, &123.456f64).unwrap();
         assert_eq!(
@@ -34,6 +36,7 @@ fn serialize_scalar() {
                 .value(),
             123.456
         );
+        assert_eq!(from_v8::<f64>(scope, float).unwrap(), 123.456f64);
 
         let boolean = to_v8(scope, &true).unwrap();
         assert!(
@@ -41,19 +44,35 @@ fn serialize_scalar() {
                 .expect("expected boolean")
                 .is_true()
         );
+        assert!(from_v8::<bool>(scope, boolean).unwrap());
     });
 }
 
 #[test]
 #[serial]
-fn serialize_string() {
+fn string() {
     run(|scope| {
+        let hello = String::from("hello");
+        let value = to_v8(scope, &hello).unwrap();
         assert_eq!(
-            v8::Local::<v8::String>::try_from(to_v8(scope, &"hello").unwrap())
+            v8::Local::<v8::String>::try_from(value)
                 .expect("expected string")
                 .to_rust_string_lossy(scope),
             "hello"
         );
+        assert_eq!(from_v8::<String>(scope, value).unwrap(), hello);
+
+        // BUG: https://github.com/facet-rs/facet/issues/794
+        // let cow = Cow::Borrowed("hello");
+        // let value = to_v8(scope, &cow).unwrap();
+        // assert_eq!(
+        //     v8::Local::<v8::String>::try_from(value)
+        //         .expect("expected string")
+        //         .to_rust_string_lossy(scope),
+        //     "hello"
+        // );
+        // assert_eq!(from_v8::<Cow<str>>(scope, value).unwrap(), cow);
+
         // assert_eq!(
         //     v8::Local::<v8::String>::try_from(to_v8(scope, &&"hello").unwrap())
         //         .expect("expected string")
@@ -91,7 +110,7 @@ fn serialize_string() {
 
 #[test]
 #[serial]
-fn serialize_array() {
+fn array() {
     run(|scope| {
         let array = to_v8(scope, &[1, 2, 3]).unwrap();
         check_function(
@@ -105,6 +124,7 @@ fn serialize_array() {
                 }
             }"#,
         );
+        assert_eq!(from_v8::<Vec<i32>>(scope, array).unwrap(), vec![1, 2, 3]);
 
         let vec = to_v8(scope, &vec![1, 2, 3]).unwrap();
         check_function(
@@ -132,7 +152,7 @@ fn serialize_array() {
     })
 }
 
-#[derive(Facet)]
+#[derive(Facet, PartialEq, Debug)]
 struct Plain {
     a: i32,
     b: String,
@@ -141,7 +161,7 @@ struct Plain {
 
 #[test]
 #[serial]
-fn serialize_object() {
+fn object() {
     run(|scope| {
         let plain = to_v8(
             scope,
@@ -150,16 +170,25 @@ fn serialize_object() {
                 b: "hello".to_string(),
                 c: 3.4,
             },
-        );
+        )
+        .unwrap();
         check_function(
             scope,
             "check",
-            &[plain.unwrap()],
+            &[plain],
             r#"function check(obj) {
                 if (typeof obj !== 'object' || obj.a !== 42 || obj.b !== 'hello' || obj.c !== 3.4) {
                     throw new Error('Expected { a: 42, b: "hello", c: 3.4 }');
                 }
             }"#,
+        );
+        assert_eq!(
+            from_v8::<Plain>(scope, plain).unwrap(),
+            Plain {
+                a: 42,
+                b: "hello".to_string(),
+                c: 3.4,
+            }
         );
 
         let constructor = compile_function(
@@ -197,6 +226,15 @@ fn serialize_object() {
                 }
             }"#,
         );
+        // This should succeed even though the JS constructor adds fields via the prototype.
+        assert_eq!(
+            from_v8::<Plain>(scope, plain_with_constructor).unwrap(),
+            Plain {
+                a: 42,
+                b: "hello".to_string(),
+                c: 3.4,
+            }
+        );
     })
 }
 
@@ -208,7 +246,7 @@ struct PlainRcs {
 
 #[test]
 #[serial]
-fn serialize_smart_pointers() {
+fn smart_pointers() {
     run(|scope| {
         let plain = Rc::new(Plain {
             a: 42,
@@ -242,7 +280,7 @@ fn serialize_smart_pointers() {
     })
 }
 
-#[derive(Facet)]
+#[derive(Facet, PartialEq, Debug)]
 #[facet(js_enum_repr = "string")]
 #[repr(u8)]
 enum StringyEnum {
@@ -251,7 +289,7 @@ enum StringyEnum {
     C = 3,
 }
 
-#[derive(Facet)]
+#[derive(Facet, PartialEq, Debug)]
 #[facet(js_enum_repr = "number")]
 #[repr(u8)]
 enum NumberEnum {
@@ -262,7 +300,7 @@ enum NumberEnum {
 
 #[test]
 #[serial]
-fn serialize_simple_enums() {
+fn simple_enums() {
     run(|scope| {
         let a = to_v8(scope, &StringyEnum::A).unwrap();
         let b = to_v8(scope, &StringyEnum::B).unwrap();
@@ -277,6 +315,9 @@ fn serialize_simple_enums() {
                 }
             }"#,
         );
+        assert_eq!(from_v8::<StringyEnum>(scope, a).unwrap(), StringyEnum::A);
+        assert_eq!(from_v8::<StringyEnum>(scope, b).unwrap(), StringyEnum::B);
+        assert_eq!(from_v8::<StringyEnum>(scope, c).unwrap(), StringyEnum::C);
 
         let a = to_v8(scope, &NumberEnum::A).unwrap();
         let b = to_v8(scope, &NumberEnum::B).unwrap();
@@ -291,10 +332,13 @@ fn serialize_simple_enums() {
                 }
             }"#,
         );
+        assert_eq!(from_v8::<NumberEnum>(scope, a).unwrap(), NumberEnum::A);
+        assert_eq!(from_v8::<NumberEnum>(scope, b).unwrap(), NumberEnum::B);
+        assert_eq!(from_v8::<NumberEnum>(scope, c).unwrap(), NumberEnum::C);
     })
 }
 
-#[derive(Facet)]
+#[derive(Facet, PartialEq, Debug)]
 #[repr(u8)]
 enum ComplexEnum {
     Unit,
@@ -304,7 +348,7 @@ enum ComplexEnum {
 
 #[test]
 #[serial]
-fn serialize_complex_enum() {
+fn complex_enum() {
     run(|scope| {
         let unit = to_v8(scope, &ComplexEnum::Unit).unwrap();
         let tuple = to_v8(scope, &ComplexEnum::Tuple(42, "hello".to_string())).unwrap();
@@ -333,5 +377,102 @@ fn serialize_complex_enum() {
                 }
             }"#,
         );
+
+        assert_eq!(
+            from_v8::<ComplexEnum>(scope, unit).unwrap(),
+            ComplexEnum::Unit
+        );
+        assert_eq!(
+            from_v8::<ComplexEnum>(scope, tuple).unwrap(),
+            ComplexEnum::Tuple(42, "hello".to_string())
+        );
+        assert_eq!(
+            from_v8::<ComplexEnum>(scope, struct_).unwrap(),
+            ComplexEnum::Struct {
+                a: 42,
+                b: "hello".to_string()
+            }
+        );
+    })
+}
+
+#[derive(Facet, PartialEq, Debug)]
+struct TypedArray<T> {
+    #[facet(typed_array)]
+    data: Vec<T>,
+}
+
+#[test]
+#[serial]
+fn typed_arrays_u8() {
+    run(|scope| {
+        let array = TypedArray {
+            data: vec![1u8, 2, 3],
+        };
+        let v8_array = to_v8(scope, &array).unwrap();
+        check_function(
+            scope,
+            "check",
+            &[v8_array],
+            r#"function check(array) {
+                if (!(array.data instanceof Uint8Array)) {
+                    throw new Error(`Expected Uint8Array, got ${array}`);
+                }
+                if (array.data.length !== 3 || array.data[0] !== 1 || array.data[1] !== 2 || array.data[2] !== 3) {
+                    throw new Error(`Expected [1, 2, 3], got ${array}`);
+                }
+            }"#,
+        );
+        assert_eq!(from_v8::<TypedArray<u8>>(scope, v8_array).unwrap(), array);
+    })
+}
+
+#[test]
+#[serial]
+fn typed_arrays_i32() {
+    run(|scope| {
+        let array = TypedArray {
+            data: vec![1i32, 2, 3],
+        };
+        let v8_array = to_v8(scope, &array).unwrap();
+        check_function(
+            scope,
+            "check",
+            &[v8_array],
+            r#"function check(array) {
+                if (!(array.data instanceof Int32Array)) {
+                    throw new Error(`Expected Int32Array, got ${array}`);
+                }
+                if (array.data.length !== 3 || array.data[0] !== 1 || array.data[1] !== 2 || array.data[2] !== 3) {
+                    throw new Error(`Expected [1, 2, 3], got ${array}`);
+                }
+            }"#,
+        );
+        assert_eq!(from_v8::<TypedArray<i32>>(scope, v8_array).unwrap(), array);
+    })
+}
+
+#[test]
+#[serial]
+fn typed_arrays_f64() {
+    run(|scope| {
+        let array = TypedArray {
+            data: vec![1.0f64, 2.0, 3.0],
+        };
+        let v8_array = to_v8(scope, &array).unwrap();
+        check_function(
+            scope,
+            "check",
+            &[v8_array],
+            r#"function check(array) {
+                if (!(array.data instanceof Float64Array)) {
+                    throw new Error(`Expected Float64Array, got ${array}`);
+                }
+                if (array.data.length !== 3 || array.data[0] !== 1.0 || array.data[1] !== 2.0 || array.data[2] !== 3.0) {
+                    throw new Error(`Expected [1.0, 2.0, 3.0], got ${array}`);
+                }
+            }"#,
+        );
+        assert_eq!(from_v8::<TypedArray<f64>>(scope, v8_array).unwrap(), array);
     })
 }

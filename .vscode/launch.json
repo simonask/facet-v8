@@ -46,7 +46,7 @@
             "type": "cppvsdbg",
             "request": "launch",
             "name": "Debug integration test 'serialize' (Windows)",
-            "program": "${workspaceFolder}/target/debug/deps/serialize-23d000daf4e19f8c.exe",
+            "program": "${workspaceFolder}/target/debug/deps/serialize-4954fa71e1abe6f1.exe",
             "args": [],
             "cwd": "${workspaceFolder}",
             "stopAtEntry": false,

@@ -76,7 +76,7 @@ Conversion table
 | `f32`, `f64`                   | `number`        | `v8::Number`    |       |
 | `String`, `&str`, `Cow<str>`, `Box<str>` | `string`        | `v8::String`   |       |
 | Enums with only unit variants | `string` or `number` | `v8::String` or `v8::Integer` | Based on `#[facet(js_enum_repr = "...")]` |
-| Enums with any data-carrying variants | `object`        | `v8::Object`    | Discriminant in `"type"` (or the field indicated by `#[facet(js_enum_tag)]` |
+| Enums with any data-carrying variants | `object`        | `v8::Object`    | Embedded enum tag (`"type"`); tuple variants are arrays in JS, but still gain a `"type"` property |
 | Tuples `(A, B, ..)`            | `array`         | `v8::Array`     |       |
 | Structs                        | `object`        | `v8::Object`    | Except transparent structs where the inner type is a primitive |
 | `Vec<T>`, `Box<[T]>`, `&[T]`   | `Array`         | `v8::Array`     | If `T` is a supported primitive, it will be marshalled as a `TypedArray` (`Uint8Array`, etc.) if `#[facet(typed_array)]` is present on the field |
