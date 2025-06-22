@@ -268,11 +268,11 @@ impl IntConversion for u64 {
                 .try_into()
                 .map_err(|_| Error::IntOverflow(shape))
         } else if let Ok(bigint) = v8::Local::<v8::BigInt>::try_from(value) {
-            let (value, truncated) = bigint.u64_value();
-            if truncated {
-                Err(Error::IntOverflow(shape))
-            } else {
+            let (value, lossless) = bigint.u64_value();
+            if lossless {
                 Ok(value)
+            } else {
+                Err(Error::IntOverflow(shape))
             }
         } else {
             Err(Error::UnexpectedValue {

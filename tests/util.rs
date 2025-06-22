@@ -14,6 +14,7 @@ pub fn run(f: impl FnOnce(&mut v8::HandleScope<v8::Context>)) {
     f(scope);
 }
 
+#[allow(dead_code)]
 pub fn compile_function<'s>(
     scope: &mut v8::HandleScope<'s>,
     check_function_name: &str,
@@ -39,6 +40,7 @@ pub fn compile_function<'s>(
     func
 }
 
+#[allow(dead_code)]
 pub fn check_function<'s>(
     scope: &mut v8::HandleScope<'s>,
     check_function_name: &str,
@@ -53,6 +55,7 @@ pub fn check_function<'s>(
     };
 }
 
+#[allow(dead_code)]
 pub fn fail_on_exception(scope: &mut v8::TryCatch<v8::HandleScope>) -> ! {
     let exception = scope.exception().unwrap();
     let message = exception.to_string(scope).expect("no exception message");

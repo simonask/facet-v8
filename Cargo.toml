@@ -13,8 +13,14 @@ thiserror = "2.0.12"
 v8 = "137.2.0"
 
 [dev-dependencies]
-serial_test = "3.2.0"
-facet = { version = "0.27.14", default-features = false, features = ["alloc", "reflect"] }
+facet = { version = "0.27.14", default-features = false, features = ["std", "reflect"] }
+serde_v8 = "0.260.0"
+divan = "0.1.21"
+serde = { version = "1.0.219", features = ["derive"] }
 
 [features]
 deno = ["dep:deno_core"]
+
+[[bench]]
+name = "serde"
+harness = false

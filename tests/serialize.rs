@@ -2,13 +2,11 @@ use std::rc::Rc;
 
 use facet::Facet;
 use facet_v8::{Constructors, from_v8, to_v8, to_v8_with_constructors};
-use serial_test::serial;
 
 mod util;
 use util::{check_function, compile_function, run};
 
 #[test]
-#[serial]
 fn scalar() {
     run(|scope| {
         let uint = to_v8(scope, &123u32).unwrap();
@@ -49,7 +47,6 @@ fn scalar() {
 }
 
 #[test]
-#[serial]
 fn string() {
     run(|scope| {
         let hello = String::from("hello");
@@ -109,7 +106,6 @@ fn string() {
 }
 
 #[test]
-#[serial]
 fn array() {
     run(|scope| {
         let array = to_v8(scope, &[1, 2, 3]).unwrap();
@@ -160,7 +156,6 @@ struct Plain {
 }
 
 #[test]
-#[serial]
 fn object() {
     run(|scope| {
         let plain = to_v8(
@@ -245,7 +240,6 @@ struct PlainRcs {
 }
 
 #[test]
-#[serial]
 fn smart_pointers() {
     run(|scope| {
         let plain = Rc::new(Plain {
@@ -299,7 +293,6 @@ enum NumberEnum {
 }
 
 #[test]
-#[serial]
 fn simple_enums() {
     run(|scope| {
         let a = to_v8(scope, &StringyEnum::A).unwrap();
@@ -347,7 +340,6 @@ enum ComplexEnum {
 }
 
 #[test]
-#[serial]
 fn complex_enum() {
     run(|scope| {
         let unit = to_v8(scope, &ComplexEnum::Unit).unwrap();
@@ -403,7 +395,6 @@ struct TypedArray<T> {
 }
 
 #[test]
-#[serial]
 fn typed_arrays_u8() {
     run(|scope| {
         let array = TypedArray {
@@ -428,7 +419,6 @@ fn typed_arrays_u8() {
 }
 
 #[test]
-#[serial]
 fn typed_arrays_i32() {
     run(|scope| {
         let array = TypedArray {
@@ -453,7 +443,6 @@ fn typed_arrays_i32() {
 }
 
 #[test]
-#[serial]
 fn typed_arrays_f64() {
     run(|scope| {
         let array = TypedArray {
